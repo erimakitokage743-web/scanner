@@ -342,10 +342,10 @@
       requestAnimationFrame(tick);
       setInterval(syncToGAS, 10000);
       renderHistory();
-      // 実際に通信できるか確認
-      fetch(GAS_URL, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({action:'ping'}) })
-        .then(function() { isOnline = true;  banner.style.display = 'none';  dbg('スキャン開始 [オンライン]'); })
-        .catch(function() { isOnline = false; banner.style.display = 'block'; dbg('スキャン開始 [オフライン]'); });
+      // 起動時は楽観的にオンラインとして開始（同期時に判定）
+      isOnline = true;
+      banner.style.display = 'none';
+      dbg('スキャン開始');
     }
 
     // QR検出ループ
@@ -384,29 +384,48 @@
       setTimeout(function() { document.body.className=''; statusEl.textContent='スキャン待機中'; busy=false; }, 1600);
     }
 
-    // GAS同期
+    // GAS同期（JSONPで通信 - CORSを完全回避）
+    var syncTimer = null;
     function syncToGAS() {
       if (pending.length === 0) return;
       var sending = pending.slice();
-      fetch(GAS_URL, {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ action: 'batchCheckin', ids: sending })
-      })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
+      var cbName  = 'gasCallback_' + Date.now();
+      var script  = document.createElement('script');
+
+      // タイムアウト処理（10秒）
+      var timer = setTimeout(function() {
+        if (window[cbName]) {
+          delete window[cbName];
+          document.body.removeChild(script);
+          isOnline = false; banner.style.display = 'block';
+          dbg('同期タイムアウト（オフライン？）');
+        }
+      }, 10000);
+
+      window[cbName] = function(data) {
+        clearTimeout(timer);
+        delete window[cbName];
+        try { document.body.removeChild(script); } catch(e) {}
         isOnline = true; banner.style.display = 'none';
-        if (d && d.status === 'success') {
-          done = done.concat(sending).concat(d.already||[]).filter(function(v,i,a){return a.indexOf(v)===i;});
+        if (data && data.status === 'success') {
+          done = done.concat(sending).concat(data.already||[]).filter(function(v,i,a){return a.indexOf(v)===i;});
           pending = pending.filter(function(id){ return sending.indexOf(id)<0; });
           savePending(); saveDone(); renderHistory();
           dbg('同期OK: ' + new Date().toLocaleTimeString());
         }
-      })
-      .catch(function() {
+      };
+
+      script.src = GAS_URL
+        + '?action=batchCheckin'
+        + '&ids=' + encodeURIComponent(sending.join(','))
+        + '&callback=' + cbName;
+      script.onerror = function() {
+        clearTimeout(timer);
+        delete window[cbName];
         isOnline = false; banner.style.display = 'block';
         dbg('同期失敗（オフライン）');
-      });
+      };
+      document.body.appendChild(script);
     }
 
     // 履歴
