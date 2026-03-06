@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>受付スキャナー</title>
+  <script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: sans-serif;
+      background: #f0f0f0;
+      text-align: center;
+      transition: background-color 0.4s;
+    }
+
+    /* ===== ステップ画面 ===== */
+    #overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #f0f0f0;
+      z-index: 999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .icon  { font-size: 64px; line-height: 1.2; margin-bottom: 10px; }
+    .title { font-size: 1.4em; font-weight: bold; color: #222; margin-bottom: 8px; }
+    .desc  { font-size: 0.9em; color: #555; line-height: 1.7; margin-bottom: 24px; max-width: 280px; }
+
+    .sbtn {
+      display: block; width: 260px; padding: 15px; margin-bottom: 10px;
+      font-size: 1em; font-weight: bold; color: #fff; border: none;
+      border-radius: 40px; cursor: pointer; -webkit-appearance: none;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+    }
+    .green  { background: #2e7d32; }
+    .blue   { background: #1565c0; }
+    .gray   { background: #888; font-size: 0.9em; }
+    .orange { background: #bf360c; }
+
+    #errBox {
+      display: none; margin-top: 12px; padding: 12px;
+      background: #ffebee; color: #b71c1c; border-radius: 8px;
+      font-size: 0.85em; line-height: 1.6; text-align: left; max-width: 290px;
+    }
+
+    /* ===== スキャン画面 ===== */
+    body.ok { background: #2e7d32; }
+    body.ng { background: #c62828; }
+
+    #statusBar {
+      padding: 16px 10px 8px; font-size: 1.5em; font-weight: bold; color: #333;
+    }
+    body.ok #statusBar, body.ng #statusBar { color: #fff; }
+
+    #cam {
+      display: block; width: 85%; max-width: 340px;
+      height: 85vw; max-height: 340px;
+      object-fit: cover; background: #000;
+      border-radius: 12px; margin: 0 auto;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    }
+
+    /* オフライン表示バナー */
+    #offlineBanner {
+      display: none;
+      background: #f57f17; color: #fff;
+      padding: 6px 12px; font-size: 0.85em; font-weight: bold;
+      margin: 6px auto; border-radius: 6px; max-width: 340px;
+    }
+
+    #history { width: 94%; margin: 10px auto 0; text-align: left; }
+    .hrow {
+      display: flex; justify-content: space-between;
+      background: #fff; padding: 10px 14px; border-radius: 8px;
+      margin-bottom: 6px; font-size: 0.9em; font-weight: bold;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .hrow.pending { border-left: 4px solid #f57f17; }
+    .hrow.synced  { border-left: 4px solid #2e7d32; }
+
+    #dbg {
+      position: fixed; bottom: 8px; left: 8px;
+      font-size: 11px; color: #444;
+      background: rgba(255,255,255,0.9);
+      padding: 4px 8px; border-radius: 4px;
+      max-width: 95%; word-break: break-all; text-align: left;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ===== STEP 1: カメラ ===== -->
+  <div id="overlay">
+    <div id="s1">
+      <div class="icon">📷</div>
+      <div class="title">カメラの許可</div>
+      <div class="desc">
+        QRコードを読み取るために<br>カメラの使用を許可してください。<br><br>
+        ボタンを押すとブラウザの<br>許可ダイアログが表示されます。
+      </div>
+      <button class="sbtn green" onclick="doCamera()">📷 カメラを起動する</button>
+      <div id="errBox"></div>
+    </div>
+
+    <!-- ===== STEP 2: 音声 ===== -->
+    <div id="s2" style="display:none">
+      <div class="icon">🔊</div>
+      <div class="title">音声の有効化</div>
+      <div class="desc">
+        スキャン結果を音でお知らせします。<br><br>
+        ※マナーモードでは音が鳴りません。
+      </div>
+      <button class="sbtn blue"  onclick="doAudio()">🔊 音声を有効にする</button>
+      <button class="sbtn gray"  onclick="skipAudio()">音なしでスキップ</button>
+    </div>
+
+    <!-- ===== STEP 3: 開始 ===== -->
+    <div id="s3" style="display:none">
+      <div class="icon">✅</div>
+      <div class="title">準備完了</div>
+      <div class="desc" id="s3msg">
+        カメラと音声の準備ができました。<br>スキャンを開始してください。
+      </div>
+      <button class="sbtn orange" onclick="doStart()">▶ スキャン開始</button>
+    </div>
+  </div>
+
+  <!-- ===== スキャン画面 ===== -->
+  <div id="statusBar">スキャン待機中</div>
+  <div id="offlineBanner">📵 オフライン中 - スキャン結果はローカルに保存しています</div>
+  <video id="cam" playsinline muted autoplay></video>
+  <div id="history">
+    <p style="color:#aaa;font-size:.85em;margin-top:10px">スキャン履歴はまだありません</p>
+  </div>
+  <div id="dbg">読み込み完了</div>
+
+  <script>
+    // ============================================================
+    // ★ここだけ自分のGASデプロイURLに書き換えてください
+    // ============================================================
+    var GAS_URL = 'https://script.google.com/macros/s/ここにデプロイIDを入力/exec';
+
+    // ============================================================
+    // 変数
+    // ============================================================
+    var camEl    = document.getElementById('cam');
+    var statusEl = document.getElementById('statusBar');
+    var dbgEl    = document.getElementById('dbg');
+    var histEl   = document.getElementById('history');
+
+    var audioCtx = null;
+    var scanning = false;
+    var busy     = false;
+    var isOnline = navigator.onLine;
+
+    // オフライン対応: localStorageに保存
+    // （GitHub Pagesは通常のHTTPSページなのでlocalStorageが使える）
+    var pending = JSON.parse(localStorage.getItem('scanner_pending') || '[]');
+    var done    = JSON.parse(localStorage.getItem('scanner_done')    || '[]');
+
+    function savePending() { localStorage.setItem('scanner_pending', JSON.stringify(pending)); }
+    function saveDone()    { localStorage.setItem('scanner_done',    JSON.stringify(done));    }
+
+    // ============================================================
+    // オンライン/オフライン監視
+    // ============================================================
+    window.addEventListener('online',  function() {
+      isOnline = true;
+      document.getElementById('offlineBanner').style.display = 'none';
+      dbg('オンライン復帰 → 同期開始');
+      syncToGAS();
+    });
+    window.addEventListener('offline', function() {
+      isOnline = false;
+      document.getElementById('offlineBanner').style.display = 'block';
+      dbg('オフライン中 - ローカル保存モード');
+    });
+
+    // ============================================================
+    // ステップ切り替え
+    // ============================================================
+    function goStep(n) {
+      document.getElementById('s1').style.display = (n === 1) ? '' : 'none';
+      document.getElementById('s2').style.display = (n === 2) ? '' : 'none';
+      document.getElementById('s3').style.display = (n === 3) ? '' : 'none';
+    }
+
+    function showErr(html) {
+      var b = document.getElementById('errBox');
+      b.style.display = 'block';
+      b.innerHTML = html;
+    }
+
+    function dbg(msg) {
+      dbgEl.textContent = msg;
+      console.log('[scanner]', msg);
+    }
+
+    // ============================================================
+    // STEP 1: カメラ
+    // ============================================================
+    function doCamera() {
+      dbg('カメラ取得を開始...');
+      document.getElementById('errBox').style.display = 'none';
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showErr('❌ カメラAPIが使えません。<br>URLが https:// で始まっているか確認してください。');
+        dbg('エラー: mediaDevices なし');
+        return;
+      }
+
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+        .then(function(stream) {
+          dbg('カメラ取得成功（リアカメラ）');
+          camEl.srcObject = stream;
+          goStep(2);
+        })
+        .catch(function(err1) {
+          dbg('リアカメラ失敗(' + err1.name + ')、再試行...');
+          navigator.mediaDevices.getUserMedia({ video: true })
+            .then(function(stream) {
+              dbg('カメラ取得成功');
+              camEl.srcObject = stream;
+              goStep(2);
+            })
+            .catch(function(err2) {
+              dbg('全カメラ失敗: ' + err2.name);
+              var hint = '';
+              if      (err2.name === 'NotAllowedError')  hint = 'ブラウザの設定でカメラを許可してください。';
+              else if (err2.name === 'NotFoundError')    hint = 'カメラが見つかりません。';
+              else if (err2.name === 'NotReadableError') hint = '他のアプリがカメラを使用中です。';
+              else                                       hint = 'Safariで開き直してください。';
+              showErr('❌ ' + err2.name + '<br>' + hint);
+            });
+        });
+    }
+
+    // ============================================================
+    // STEP 2: 音声
+    // ============================================================
+    function doAudio() {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        var p = audioCtx.resume();
+        var next = function() {
+          beep(880, 150);
+          document.getElementById('s3msg').innerHTML = 'カメラと音声の準備ができました。<br>スキャンを開始してください。';
+          goStep(3);
+          dbg('音声OK');
+        };
+        if (p && typeof p.then === 'function') { p.then(next); } else { next(); }
+      } catch(e) {
+        dbg('音声エラー: ' + e.message);
+        skipAudio();
+      }
+    }
+
+    function skipAudio() {
+      audioCtx = null;
+      document.getElementById('s3msg').innerHTML = 'カメラの準備ができました。（音声なし）<br>スキャンを開始してください。';
+      goStep(3);
+      dbg('音声スキップ');
+    }
+
+    // ============================================================
+    // STEP 3: スキャン開始
+    // ============================================================
+    function doStart() {
+      document.getElementById('overlay').style.display = 'none';
+
+      // オフライン状態の確認
+      if (!isOnline) {
+        document.getElementById('offlineBanner').style.display = 'block';
+      }
+
+      var p = camEl.play();
+      if (p && typeof p.then === 'function') {
+        p.then(function() { dbg('映像再生開始'); }).catch(function(e) { dbg('play()無視: ' + e.message); });
+      }
+
+      scanning = true;
+      requestAnimationFrame(tick);
+      setInterval(syncToGAS, 10000); // 10秒ごとに同期試行
+      renderHistory();
+      dbg('スキャン開始' + (isOnline ? '' : ' [オフライン]'));
+    }
+
+    // ============================================================
+    // QRコード検出ループ
+    // ============================================================
+    function tick() {
+      if (!scanning) return;
+      if (!busy && camEl.readyState >= 2 && camEl.videoWidth > 0) {
+        try {
+          var w = camEl.videoWidth, h = camEl.videoHeight;
+          var sz = Math.min(w, h);
+          var cv = document.createElement('canvas');
+          cv.width = sz; cv.height = sz;
+          var ctx = cv.getContext('2d');
+          ctx.drawImage(camEl, (w-sz)/2, (h-sz)/2, sz, sz, 0, 0, sz, sz);
+          var img  = ctx.getImageData(0, 0, sz, sz);
+          var code = jsQR(img.data, sz, sz);
+          if (code && code.data && code.data.trim() !== '') {
+            onQR(code.data.trim());
+          }
+        } catch(e) { }
+      }
+      requestAnimationFrame(tick);
+    }
+
+    // ============================================================
+    // QR検出時の処理
+    // ============================================================
+    function onQR(id) {
+      if (busy) return;
+      busy = true;
+      dbg('QR検出: ' + id);
+
+      // すでにpendingまたはdoneにあれば入場済み
+      if (pending.indexOf(id) >= 0 || done.indexOf(id) >= 0) {
+        document.body.className = 'ng';
+        statusEl.textContent = '× 入場済み';
+        beep(200, 500);
+        setTimeout(function() {
+          document.body.className = '';
+          statusEl.textContent = 'スキャン待機中';
+          busy = false;
+        }, 2200);
+        return;
+      }
+
+      // 新規入場: まずローカルに記録
+      pending.push(id);
+      savePending();
+
+      document.body.className = 'ok';
+      statusEl.textContent = '✓ 入場OK！';
+      beep(880, 200);
+      addHistory(id, false);
+      syncToGAS(); // オンラインならすぐ同期
+
+      setTimeout(function() {
+        document.body.className = '';
+        statusEl.textContent = 'スキャン待機中';
+        busy = false;
+      }, 1600);
+    }
+
+    // ============================================================
+    // GASへの同期（fetch使用 - GitHub PagesからはCORS対応が必要）
+    // ============================================================
+    function syncToGAS() {
+      if (pending.length === 0 || !isOnline) return;
+
+      var sending = pending.slice();
+      pending = [];
+      savePending();
+      dbg('GASへ送信中: ' + sending.length + '件');
+
+      // GASにPOSTリクエスト
+      fetch(GAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'batchCheckin', ids: sending })
+      })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data && data.status === 'success') {
+          // 送信成功 → doneリストへ移動
+          done = done.concat(sending).concat(data.already || []);
+          done = done.filter(function(v, i, a) { return a.indexOf(v) === i; });
+          saveDone();
+          // pending側の履歴表示をsynced（緑）に更新
+          renderHistory();
+          dbg('同期OK: ' + new Date().toLocaleTimeString());
+        } else {
+          // 失敗 → pendingに戻す
+          pending = sending.concat(pending);
+          savePending();
+          dbg('同期失敗（再試行待ち）');
+        }
+      })
+      .catch(function(e) {
+        // 通信エラー → pendingに戻す
+        pending = sending.concat(pending);
+        savePending();
+        dbg('通信エラー（オフライン？）: ' + e.message);
+        document.getElementById('offlineBanner').style.display = 'block';
+      });
+    }
+
+    // ============================================================
+    // 履歴表示
+    // ============================================================
+    function addHistory(id, synced) {
+      var now = new Date();
+      var t   = now.getHours() + ':' + ('0' + now.getMinutes()).slice(-2);
+      // localStorageに履歴を保存
+      var hist = JSON.parse(localStorage.getItem('scanner_history') || '[]');
+      hist.unshift({ id: id, time: t, synced: synced });
+      if (hist.length > 20) hist = hist.slice(0, 20);
+      localStorage.setItem('scanner_history', JSON.stringify(hist));
+      renderHistory();
+    }
+
+    function renderHistory() {
+      var hist = JSON.parse(localStorage.getItem('scanner_history') || '[]');
+      if (hist.length === 0) {
+        histEl.innerHTML = '<p style="color:#aaa;font-size:.85em;margin-top:10px">スキャン履歴はまだありません</p>';
+        return;
+      }
+      // pending/doneの状態を反映
+      histEl.innerHTML = hist.slice(0, 5).map(function(h) {
+        var isSynced = done.indexOf(h.id) >= 0;
+        var label    = isSynced ? '✓ 同期済' : '⏳ 未送信';
+        var cls      = isSynced ? 'synced' : 'pending';
+        return '<div class="hrow ' + cls + '">'
+          + '<span>ID: ' + h.id + '</span>'
+          + '<span style="color:#888;font-size:0.85em;">' + h.time + ' ' + label + '</span>'
+          + '</div>';
+      }).join('');
+    }
+
+    // ============================================================
+    // 音声
+    // ============================================================
+    function beep(freq, ms) {
+      if (!audioCtx) return;
+      try {
+        var o = audioCtx.createOscillator();
+        var g = audioCtx.createGain();
+        o.connect(g); g.connect(audioCtx.destination);
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + ms / 1000);
+        o.start(); o.stop(audioCtx.currentTime + ms / 1000);
+      } catch(e) { }
+    }
+
+    // ページ読み込み時にSTEP1を表示
+    goStep(1);
+  </script>
+</body>
+</html>
